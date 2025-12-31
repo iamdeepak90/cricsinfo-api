@@ -13,6 +13,7 @@ from app.models.schemas import (
 from app.sources.cricinfo_rss import CricinfoRSSSource
 from app.sources.cricinfo_desktop import CricinfoDesktopSource
 from app.sources.espn_scores import ESPNScoreboardSource
+from app.sources.criczop_scores import CriczopScoresSource
 
 def _tz(tz_name: Optional[str]) -> ZoneInfo:
     return ZoneInfo(tz_name or settings.TZ)
@@ -25,7 +26,8 @@ def _is_today_match(m: Match, today: date) -> bool:
         return m.start_date <= today <= m.end_date
     if m.start_date:
         return m.start_date == today
-    return True  # unknown -> allow in "today bucket" heuristically
+    # If we don't know the date, only treat it as "today" when it's clearly LIVE.
+    return m.status == MatchStatus.LIVE
 
 def _merge(old: Match, new: Match) -> Match:
     # Prefer fields that are present, and prefer non-UNKNOWN status
@@ -47,13 +49,14 @@ def _merge(old: Match, new: Match) -> Match:
 
 class ScoresService:
     def __init__(self):
+        self.criczop = CriczopScoresSource()
         self.rss = CricinfoRSSSource()
         self.desktop = CricinfoDesktopSource()
         self.espn = ESPNScoreboardSource()
 
     async def _fetch_all_sources(self) -> List[Match]:
         # Try multiple sources and merge
-        sources = [self.rss, self.desktop, self.espn]
+        sources = [self.criczop, self.rss, self.desktop, self.espn]
         merged: Dict[int, Match] = {}
 
         for src in sources:
@@ -80,9 +83,11 @@ class ScoresService:
 
         all_matches = await self._fetch_all_sources()
 
-        # Save match_id -> url for detail endpoint
+        # Save match_id -> url (and match metadata) for detail endpoint
         url_map = {m.match_id: m.url for m in all_matches if m.url}
+        match_map = {m.match_id: m for m in all_matches}
         cache.set(f"urlmap:{tz.key}", url_map, ttl_seconds=3600)
+        cache.set(f"matchmap:{tz.key}", match_map, ttl_seconds=3600)
 
         today_matches = [m for m in all_matches if _is_today_match(m, today)]
         live = [m for m in today_matches if m.status == MatchStatus.LIVE]
@@ -156,12 +161,17 @@ class ScoresService:
         if not match_url:
             return None
 
-        # Build a minimal Match object (you can expand scraping later)
-        match = Match(match_id=match_id, source="resolved", url=match_url)
+        match_map = cache.get(f"matchmap:{tz.key}") or {}
+        match = match_map.get(match_id) or Match(match_id=match_id, source="resolved", url=match_url)
 
         excerpt = None
         try:
-            excerpt = await self.espn.fetch_match_detail_excerpt(match_url)
+            if "criczop.com" in match_url:
+                excerpt = await self.criczop.fetch_match_detail_excerpt(match_url)
+            elif "espn" in match_url:
+                excerpt = await self.espn.fetch_match_detail_excerpt(match_url)
+            else:
+                excerpt = await self.espn.fetch_match_detail_excerpt(match_url)
         except Exception:
             excerpt = None
 

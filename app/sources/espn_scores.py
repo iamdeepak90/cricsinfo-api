@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from app.core.http import fetch_text
 from app.models.schemas import Match, MatchStatus
-from app.sources.parsing import extract_match_id_from_url, parse_date_range, classify_status
+from app.sources.parsing import make_uid, parse_date_range, classify_status
 
 SCORES_URLS = [
     "https://www.espn.com/cricket/scores",
@@ -48,9 +48,8 @@ class ESPNScoreboardSource:
                 continue
 
             full_url = href if href.startswith("http") else f"https://www.espn.com{href}"
-            match_id = extract_match_id_from_url(full_url)
-            if not match_id:
-                continue
+            # Exposed as API `match_id` (stable across providers)
+            match_id = make_uid(self.name, full_url)
 
             card = self._find_match_card(a)
             block_text = card.get_text(" ", strip=True) if card else a.get_text(" ", strip=True)
@@ -79,9 +78,7 @@ class ESPNScoreboardSource:
                 )
             )
 
-        uniq = {}
-        for m in matches:
-            uniq[m.match_id] = m
+        uniq = {m.match_id: m for m in matches}
         return list(uniq.values())
 
     async def fetch_match_detail_excerpt(self, match_url: str) -> str:

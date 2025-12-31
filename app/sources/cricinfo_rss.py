@@ -2,7 +2,7 @@ from bs4 import BeautifulSoup
 from typing import List
 from app.core.http import fetch_text
 from app.models.schemas import Match, MatchStatus
-from app.sources.parsing import extract_match_id_from_url, parse_date_range, classify_status
+from app.sources.parsing import make_uid, parse_date_range, classify_status
 
 RSS_URLS = [
     "https://www.espncricinfo.com/rss/livescores.xml",
@@ -36,9 +36,7 @@ class CricinfoRSSSource:
             if not link:
                 continue
 
-            match_id = extract_match_id_from_url(link)
-            if not match_id:
-                continue
+            match_id = make_uid(self.name, link)
 
             block_text = " ".join([x for x in [title, desc] if x])
             status_s = classify_status(block_text)

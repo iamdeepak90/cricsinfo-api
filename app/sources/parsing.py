@@ -1,4 +1,5 @@
 import re
+import zlib
 from datetime import date
 from typing import Optional, Tuple
 
@@ -6,6 +7,15 @@ MONTHS = {
     "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
     "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
 }
+
+
+def make_uid(source: str, url: str) -> int:
+    """Stable integer id from (source, url).
+
+    We want `/live-score/{match_id}` to work across multiple providers.
+    Provider-specific IDs may collide, so we expose a provider-scoped CRC32.
+    """
+    return zlib.crc32(f"{source}|{url}".encode("utf-8")) & 0xFFFFFFFF
 
 def extract_match_id_from_url(url: str) -> Optional[int]:
     # Cricinfo classic: /ci/engine/match/1455614.html

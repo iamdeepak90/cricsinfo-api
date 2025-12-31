@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from app.core.http import fetch_text
 from app.models.schemas import Match, MatchStatus
-from app.sources.parsing import extract_match_id_from_url, parse_date_range, classify_status
+from app.sources.parsing import make_uid, parse_date_range, classify_status
 
 DESKTOP_URL = "https://www.espncricinfo.com/ci/engine/match/scores/desktop.html"
 
@@ -36,9 +36,7 @@ class CricinfoDesktopSource:
         for a in soup.select('a[href*="/ci/engine/match/"]'):
             href = a.get("href", "")
             url = href if href.startswith("http") else f"https://www.espncricinfo.com{href}"
-            match_id = extract_match_id_from_url(url)
-            if not match_id:
-                continue
+            match_id = make_uid(self.name, url)
 
             container = self._pick_container(a)
             block_text = container.get_text(" ", strip=True) if container else a.get_text(" ", strip=True)
