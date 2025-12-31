@@ -13,5 +13,5 @@ async def live_score(timezone: str = Query(default=None, description="IANA timez
 async def live_score_detail(match_id: int, timezone: str = Query(default=None)):
     detail = await service.get_match_detail(match_id=match_id, timezone=timezone)
     if not detail:
-        raise HTTPException(status_code=404, detail="Match not found (try fetching /live-score first).")
+        raise HTTPException(status_code=404, detail="Match not found. Call /live-score first to get valid IDs.")
     return detail

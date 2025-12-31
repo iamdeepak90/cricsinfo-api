@@ -1,19 +1,11 @@
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
-from typing import Dict, List, Optional
+from typing import Optional, Dict, List
 
 from app.core.cache import cache
 from app.core.config import settings
-from app.models.schemas import (
-    Match,
-    MatchListResponse,
-    MatchDetailResponse,
-    MatchStatus,
-)
-from app.sources.cricinfo_rss import CricinfoRSSSource
-from app.sources.cricinfo_desktop import CricinfoDesktopSource
-from app.sources.espn_scores import ESPNScoreboardSource
-from app.sources.criczop_scores import CriczopScoresSource
+from app.models.schemas import Match, MatchListResponse, MatchDetailResponse, MatchStatus
+from app.sources.criczop import CriczopSource, fetch_match_page
 
 def _tz(tz_name: Optional[str]) -> ZoneInfo:
     return ZoneInfo(tz_name or settings.TZ)
@@ -21,56 +13,14 @@ def _tz(tz_name: Optional[str]) -> ZoneInfo:
 def _today(tz: ZoneInfo) -> date:
     return datetime.now(tz).date()
 
-def _is_today_match(m: Match, today: date) -> bool:
-    if m.start_date and m.end_date:
-        return m.start_date <= today <= m.end_date
+def _is_today(m: Match, today: date) -> bool:
     if m.start_date:
         return m.start_date == today
-    # If we don't know the date, only treat it as "today" when it's clearly LIVE.
-    return m.status == MatchStatus.LIVE
-
-def _merge(old: Match, new: Match) -> Match:
-    # Prefer fields that are present, and prefer non-UNKNOWN status
-    data = old.model_dump()
-    nd = new.model_dump()
-    for k, v in nd.items():
-        if v is None:
-            continue
-        if k == "status":
-            if data.get("status") == MatchStatus.UNKNOWN and v != MatchStatus.UNKNOWN:
-                data[k] = v
-        else:
-            if data.get(k) is None or (isinstance(data.get(k), str) and not data.get(k)):
-                data[k] = v
-    # Always keep a URL that works (new might be better)
-    data["url"] = nd.get("url") or data["url"]
-    data["source"] = nd.get("source") or data["source"]
-    return Match(**data)
+    return True
 
 class ScoresService:
     def __init__(self):
-        self.criczop = CriczopScoresSource()
-        self.rss = CricinfoRSSSource()
-        self.desktop = CricinfoDesktopSource()
-        self.espn = ESPNScoreboardSource()
-
-    async def _fetch_all_sources(self) -> List[Match]:
-        # Try multiple sources and merge
-        sources = [self.criczop, self.rss, self.desktop, self.espn]
-        merged: Dict[int, Match] = {}
-
-        for src in sources:
-            try:
-                matches = await src.fetch_matches()
-            except Exception:
-                matches = []
-            for m in matches:
-                if m.match_id in merged:
-                    merged[m.match_id] = _merge(merged[m.match_id], m)
-                else:
-                    merged[m.match_id] = m
-
-        return list(merged.values())
+        self.criczop = CriczopSource()
 
     async def get_match_list(self, timezone: Optional[str] = None) -> MatchListResponse:
         tz = _tz(timezone)
@@ -81,63 +31,43 @@ class ScoresService:
         if cached:
             return cached
 
-        all_matches = await self._fetch_all_sources()
+        lists = await self.criczop.fetch_lists()
 
-        # Save match_id -> url (and match metadata) for detail endpoint
-        url_map = {m.match_id: m.url for m in all_matches if m.url}
-        match_map = {m.match_id: m for m in all_matches}
+        live = await self.criczop.fetch_live_verified(lists.live_urls)
+        upcoming = await self.criczop.build_upcoming(lists.upcoming_urls)
+        results = await self.criczop.build_results(lists.result_urls)
+
+        url_map: Dict[int, str] = {}
+        for m in (live + upcoming + results):
+            url_map[m.match_id] = m.url
         cache.set(f"urlmap:{tz.key}", url_map, ttl_seconds=3600)
-        cache.set(f"matchmap:{tz.key}", match_map, ttl_seconds=3600)
 
-        today_matches = [m for m in all_matches if _is_today_match(m, today)]
-        live = [m for m in today_matches if m.status == MatchStatus.LIVE]
-        upcoming = [m for m in today_matches if m.status == MatchStatus.UPCOMING]
-        results_today = [m for m in today_matches if m.status == MatchStatus.RESULT]
+        live_today = [m for m in live if _is_today(m, today)]
 
-        # Determine "no match today"
-        has_any_today = len(today_matches) > 0
+        mode = "mixed"
+        items: List[Match] = []
 
-        # If no match today: pick 5 recent results + 5 upcoming from all_matches
-        recent: List[Match] = []
-        future: List[Match] = []
-
-        if not has_any_today:
-            past = [m for m in all_matches if (m.end_date and m.end_date < today) or (m.start_date and m.start_date < today and m.status == MatchStatus.RESULT)]
-            past_sorted = sorted(past, key=lambda x: (x.end_date or x.start_date or date(1970,1,1)), reverse=True)
-            recent = past_sorted[:5]
-
-            fut = [m for m in all_matches if (m.start_date and m.start_date > today) or (m.status == MatchStatus.UPCOMING)]
-            fut_sorted = sorted(fut, key=lambda x: (x.start_date or date(9999,1,1)))
-            future = fut_sorted[:5]
-
-            items = recent + future
-            mode = "mixed"
-
+        if live_today:
+            mode = "live"
+            items = live_today + [m for m in upcoming if _is_today(m, today)] + [m for m in results if _is_today(m, today)]
         else:
-            # Ordering rules:
-            # 1) If live exists: show live first, then upcoming, then results
-            # 2) If no live but upcoming exists: show upcoming (then results)
-            # 3) Else show whatever we have
-            if live:
-                items = live + upcoming + results_today
-                mode = "live"
-            elif upcoming:
-                items = upcoming + results_today
+            upcoming_today = [m for m in upcoming if _is_today(m, today)]
+            if upcoming_today:
                 mode = "upcoming"
+                items = upcoming_today
             else:
-                items = results_today
                 mode = "mixed"
+                items = results[:5] + upcoming[:5]
 
         resp = MatchListResponse(
             mode=mode,
             timezone=tz.key,
             generated_at=datetime.now(tz),
             items=items,
-            live=live,
-            upcoming=upcoming if has_any_today else future,
-            recent=recent,
+            live=live_today,
+            upcoming=upcoming,
+            results=results,
         )
-
         cache.set(cache_key, resp, ttl_seconds=settings.LIST_CACHE_TTL_SECONDS)
         return resp
 
@@ -148,38 +78,38 @@ class ScoresService:
         if cached:
             return cached
 
-        # Resolve match url (best-effort)
         url_map = cache.get(f"urlmap:{tz.key}") or {}
         match_url = url_map.get(match_id)
-
-        # If url not known, refresh list once and try again
         if not match_url:
-            _ = await self.get_match_list(timezone=tz.key)
+            await self.get_match_list(timezone=tz.key)
             url_map = cache.get(f"urlmap:{tz.key}") or {}
             match_url = url_map.get(match_id)
 
         if not match_url:
             return None
 
-        match_map = cache.get(f"matchmap:{tz.key}") or {}
-        match = match_map.get(match_id) or Match(match_id=match_id, source="resolved", url=match_url)
+        parsed = await fetch_match_page(match_url)
+        if parsed:
+            status, title, series, ex = parsed
+        else:
+            status, title, series, ex = MatchStatus.UNKNOWN, None, None, ""
 
-        excerpt = None
-        try:
-            if "criczop.com" in match_url:
-                excerpt = await self.criczop.fetch_match_detail_excerpt(match_url)
-            elif "espn" in match_url:
-                excerpt = await self.espn.fetch_match_detail_excerpt(match_url)
-            else:
-                excerpt = await self.espn.fetch_match_detail_excerpt(match_url)
-        except Exception:
-            excerpt = None
+        match = Match(
+            match_id=match_id,
+            source="criczop",
+            url=match_url,
+            status=status,
+            title=title,
+            series=series,
+            score_summary=ex[:600] if status == MatchStatus.LIVE else None,
+            result_summary=ex[:400] if status == MatchStatus.RESULT else None,
+        )
 
         resp = MatchDetailResponse(
             match=match,
             fetched_at=datetime.now(tz),
             timezone=tz.key,
-            raw_text_excerpt=excerpt,
+            raw_text_excerpt=ex[:1200] if ex else None,
         )
         cache.set(cache_key, resp, ttl_seconds=settings.DETAIL_CACHE_TTL_SECONDS)
         return resp

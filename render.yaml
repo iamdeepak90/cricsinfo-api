@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: live-score-api
+    name: live-score-api-criczop
     env: docker
     plan: free
     autoDeploy: true
@@ -8,8 +8,14 @@ services:
       - key: APP_TZ
         value: Asia/Kolkata
       - key: APP_LIST_CACHE_TTL_SECONDS
-        value: "20"
+        value: "15"
       - key: APP_DETAIL_CACHE_TTL_SECONDS
-        value: "20"
+        value: "15"
       - key: APP_FETCH_TIMEOUT_SECONDS
-        value: "12"
+        value: "10"
+      - key: APP_MAX_LIVE_VERIFY
+        value: "8"
+      - key: APP_MAX_UPCOMING
+        value: "10"
+      - key: APP_MAX_RESULTS
+        value: "10"
